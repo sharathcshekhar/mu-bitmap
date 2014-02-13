@@ -60,18 +60,35 @@ typedef struct m_bitmap {
 
 /*
  * mbm_create_bitmap - creates a new bitmap
- * size 	- size of the bitmap to be created
- * filename - filename to which the map has to be flushed. If filename is NULL,
- * 			  bitmap is not written to disk
- * offset 	- offset in the file where the bitmap is to be written
  *
- * Returns: pointer to the bitmap structure
+ * Takes:
+ * 	size		- size of the bitmap to be created
+ * 	filename	- filename to which the map has to be flushed. If filename is NULL,
+ * 			 	  bitmap is not written to disk
+ * 	offset		- offset in the file where the bitmap is to be written
+ *
+ * Returns: pointer to the newly created bitmap structure
  *
  */ 
 struct m_bitmap *mbm_create_bitmap(uint32_t size, char *filename, uint64_t offset);
 
+/*
+ * mbm_load_bitmap - Loads an existing bitmap to memory
+ * 
+ * Takes:
+ * 	filename	- filename to which the map has to be flushed. If filename is NULL,
+ * 			 	  bitmap is not written to disk
+ * 	offset		- offset in the file where the bitmap was to be written
+ *
+ * Returns: pointer to the loaded bitmap structure
+ */
 struct m_bitmap* mbm_load_bitmap(char *filename, uint64_t offset);
 
+/*
+ * mbm_flush_to_disk - flush the bitmap to disk. The application has to explicitly
+ * 					   call this function to make sure the contents are flushed to
+ * 					   disk
+ */
 int mbm_flush_to_disk(struct m_bitmap *bm);
 
 /*
