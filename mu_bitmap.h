@@ -70,20 +70,19 @@ typedef struct m_bitmap {
  */ 
 struct m_bitmap *mbm_create_bitmap(uint32_t size, char *filename, uint64_t offset);
 
+struct m_bitmap* mbm_load_bitmap(char *filename, uint64_t offset);
+
+int mbm_flush_to_disk(struct m_bitmap *bm);
+
 /*
- * free the bimap
+ * free the bitmap
  */
 void mbm_free_bitmap(struct m_bitmap *bm);
 
 /*
- * gets the size of the bitmap in disk
- */
-int mbm_get_size_on_disk(struct m_bitmap *bm);
-
-/*
  * get the status of the bit
  */
-bool mbm_get_bit(struct m_bitmap *bm, uint64_t blk);
+bool mbm_is_bit_set(struct m_bitmap *bm, uint64_t bit);
 
 /*
  * clear the indicated bit
@@ -91,18 +90,15 @@ bool mbm_get_bit(struct m_bitmap *bm, uint64_t blk);
 int mbm_clear_bit(struct m_bitmap *bm, uint64_t blk);
 
 /*
- * set the indicated bit
- */
-int mbm_set_bit(struct m_bitmap *bm, uint64_t blk);
-
-/*
- * get the first clear bit
- */
-uint64_t mbm_get_first_clear(struct m_bitmap *bm);
-
-/*
- * get the first set bit
+ * set the first clear bit and return that bit
  */
 uint64_t mbm_set_first_clear(struct m_bitmap *bm);
+
+/* 
+ * Planned APIs in future version
+ */
+int mbm_get_size_on_disk(struct m_bitmap *bm);
+uint64_t mbm_get_first_clear(struct m_bitmap *bm);
+int mbm_set_bit(struct m_bitmap *bm, uint64_t blk);
 
 #endif /* _MU_BITMAP_H_ */

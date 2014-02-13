@@ -27,94 +27,64 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <stdio.h>
-#include "bitmap.h"
-
-#define T(X)
+#include "mu_bitmap.h"
+#include "mu_bitmap_priv.h"
 
 /*
- * Static functions
+ * Structure of the BitMap in disk:
+ * 	0-7 bytes	: Magic Number
+ *	8-39 bytes	: Reserved
+ *	40-47 bytes	: size of the bitmap
+ *	48 bytes+	: Bitmap 
  */
-static uint64_t set_bit(struct m_bitmap *bm, int index, int offset);
-static bool is_block_group_full(uint64_t *bm, int index);
 
 struct m_bitmap *mbm_create_bitmap(uint32_t size, char *filename, uint64_t offset)
 {
 	assert((size % BITMAP_WIDTH) == 0);
 
-	/* Number of 64 bit ints in lowest bitmap */
-	int n_low_ints = size;
-
-	T(("Number of low ints = %d\n", n_low_ints));
-
-	/* Number of 64 bit ints in mid bitmap */
-	int n_mid_ints = 0;
-	int n_mid_bits = (n_low_ints + LOWMAP_SZ - 1) / LOWMAP_SZ;
-
-	T(("Number of mid bits = %d\n", n_mid_bits));
-	if (n_mid_bits > 1) {
-		n_mid_ints = (n_mid_bits + BITMAP_WIDTH - 1) / BITMAP_WIDTH;
-	}
-	T(("Number of mid ints = %d\n", n_mid_ints));
-	
-	/* Number of 64 bit ints in top bitmap */
-	int n_top_ints = 0;
-	int n_top_bits = (n_mid_ints + MIDMAP_SZ - 1) / MIDMAP_SZ;
-	T(("Number of top bits = %d\n", n_top_bits));
-	
-	if (n_top_bits > 1) {
-		n_top_ints = (n_top_bits + BITMAP_WIDTH - 1) / BITMAP_WIDTH;
-	}
-	T(("Number of top ints = %d\n", n_top_ints));
-
 	struct m_bitmap *bm = malloc(sizeof(struct m_bitmap));
 	assert(bm);
+
 	bm->size = size;
-	bm->low_map = malloc(n_low_ints * sizeof(uint64_t));
-	memset(bm->low_map, 0, n_low_ints * sizeof(uint64_t));
+	bm->low_map = malloc(size * sizeof(uint64_t));
+	memset(bm->low_map, 0, size * sizeof(uint64_t));
 
 	if (filename != NULL) {
 		strncpy(bm->filename, filename, MAX_FILE_NAME);
-		bm->fd = open(bm->filename, O_RDWR);
+		bm->fd = open(bm->filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 		assert(bm->fd > 0);
 		lseek(bm->fd, offset, SEEK_SET);
-		//TODO: write the magic number
-		write(bm->fd, bm->size, sizeof(bm->size)); 
-		write(bm->fd, bm->low_map, n_low_ints * sizeof(uint64_t));
+		
+		//TODO: write the magic number and advance by 32 bytes
+		//for the reserved bits. For now, just advance by 40 bytes
+		lseek(bm->fd, 40, SEEK_CUR);
+		
+		write(bm->fd, &(bm->size), sizeof(bm->size)); 
+		write(bm->fd, bm->low_map, size * sizeof(uint64_t));
 	} else {
 		/* non-persistent bitmap */
 		bm->fd = -1;
 	}
 
-	if (n_mid_ints == 0) {
-		bm->mid_map = NULL;
-		bm->top_map = NULL;
-	} else {
-		bm->mid_map = malloc(n_mid_ints * sizeof(uint64_t));
-		if (n_top_ints == 0) {
-			bm->top_map = NULL;
-		} else {
-			bm->top_map = malloc(n_mid_ints * sizeof(uint64_t));
-		}
-	}
+	init_bitmap(bm);
 	return bm;
 }
 
-void mbm_free_bitmap(struct m_bitmap *bm)
+bool mbm_is_bit_set(struct m_bitmap *bm, uint64_t bit)
 {
-	assert(bm);
-	if (bm->top_map) {
-		free(bm->top_map);
+	int index = bit/BITMAP_WIDTH;
+	int bit_offset = bit % BITMAP_WIDTH;
+	uint64_t mask = (uint64_t)1 << bit_offset;
+
+	if (index >= bm->size) {
+		return false;
 	}
-	if (bm->mid_map) {
-		free(bm->mid_map);
+
+	if (bm->low_map[index] & mask) {
+		return true;
 	}
-	
-	free(bm->low_map);
-	
-	if (bm->fd != -1) { 
-		close(bm->fd);
-	}
-	free(bm);
+
+	return false;
 }
 
 int mbm_clear_bit(struct m_bitmap *bm, uint64_t bit)
@@ -128,10 +98,12 @@ int mbm_clear_bit(struct m_bitmap *bm, uint64_t bit)
 	}
 
 	(bm->low_map)[index] &= (~mask);
+	if (bm->fd != -1)
+		write_word_to_disk(bm, index);
 
 	/* set the associated mid-level bit */
 	if (bm->mid_map == NULL) {
-		return;
+		return 0;
 	}
 	int mid_index = bit / (16 * 1024);
 	int mid_offset = bit % (16 * 1024);
@@ -140,7 +112,7 @@ int mbm_clear_bit(struct m_bitmap *bm, uint64_t bit)
 
 	/* set the associated top-level bit */
 	if (bm->top_map == NULL) {
-		return;
+		return 0;
 	}
 	int top_index = (mid_index + mid_offset) / (16 * 1024);
 	int top_offset = (mid_index + mid_offset) % (16 * 1024);
@@ -152,7 +124,7 @@ int mbm_clear_bit(struct m_bitmap *bm, uint64_t bit)
 	return 0;
 }
 
-uint64_t get_first_free_blk(struct m_bitmap *bm)
+uint64_t mbm_set_first_clear(struct m_bitmap *bm)
 {
 	int offset;
 	int i;
@@ -199,12 +171,67 @@ uint64_t get_first_free_blk(struct m_bitmap *bm)
 	return 0;
 }
 
+void mbm_free_bitmap(struct m_bitmap *bm)
+{
+	assert(bm);
+	if (bm->top_map) {
+		free(bm->top_map);
+	}
+	if (bm->mid_map) {
+		free(bm->mid_map);
+	}
+	
+	free(bm->low_map);
+	
+	if (bm->fd != -1) { 
+		close(bm->fd);
+	}
+	free(bm);
+}
+
+
+struct m_bitmap* mbm_load_bitmap(char *filename, uint64_t offset)
+{
+	struct m_bitmap *bm = malloc(sizeof(struct m_bitmap));
+	assert(bm);
+	int ret = 0;
+
+	bm->fd = open(filename, O_RDWR);
+	assert(bm->fd > 0);
+	lseek(bm->fd, offset, SEEK_SET);
+	
+	//TODO: Verify magic number, advance by 32 unused bytes.
+	lseek(bm->fd, 40, SEEK_CUR);
+	
+	ret = read(bm->fd, &(bm->size), sizeof(uint64_t));
+	bm->low_map = malloc(bm->size * sizeof(uint64_t));
+	
+	//TODO: write the magic number
+	ret = read(bm->fd, bm->low_map, bm->size * sizeof(uint64_t));
+	strncpy(bm->filename, filename, MAX_FILE_NAME);
+
+	init_bitmap(bm);
+	return bm;
+}
+
+int mbm_flush_to_disk(struct m_bitmap *bm)
+{
+	fsync(bm->fd);
+	return 0;
+}
+
+/*
+ * Private functions
+ */
+
 static uint64_t set_bit(struct m_bitmap *bm, int index, int offset)
 {
 	uint64_t mid_index = 0;
 	uint64_t mid_offset = 0;
    	
 	(bm->low_map)[index] |= ((uint64_t)1 << offset);
+	if (bm->fd != -1)
+		write_word_to_disk(bm, index);
 
 	if ((bm->mid_map != NULL) && is_block_group_full(bm->low_map, index)) {
 		
@@ -228,6 +255,7 @@ static uint64_t set_bit(struct m_bitmap *bm, int index, int offset)
 	return ((index * BITMAP_WIDTH) + offset);
 }
 
+
 static bool is_block_group_full(uint64_t *bm, int index)
 {
 	int i;
@@ -241,28 +269,53 @@ static bool is_block_group_full(uint64_t *bm, int index)
 	return true;
 }
 
-bool is_blk_in_use(struct m_bitmap *bm, uint64_t blk)
+static void init_bitmap(struct m_bitmap *bm)
 {
-	int index = blk/BITMAP_WIDTH;
-	int bit_offset = blk % BITMAP_WIDTH;
-	uint64_t mask = (uint64_t)1 << bit_offset;
-	if (index >= bm->size) {
-		return -1;
+	/* Number of 64 bit ints in lowest bitmap */
+	int n_low_ints = bm->size;
+
+	T(("Number of low ints = %d\n", n_low_ints));
+
+	/* Number of 64 bit ints in mid bitmap */
+	int n_mid_ints = 0;
+	int n_mid_bits = (n_low_ints + LOWMAP_SZ - 1) / LOWMAP_SZ;
+
+	T(("Number of mid bits = %d\n", n_mid_bits));
+	if (n_mid_bits > 1) {
+		n_mid_ints = (n_mid_bits + BITMAP_WIDTH - 1) / BITMAP_WIDTH;
 	}
-	return true;
+	T(("Number of mid ints = %d\n", n_mid_ints));
+	
+	/* Number of 64 bit ints in top bitmap */
+	int n_top_ints = 0;
+	int n_top_bits = (n_mid_ints + MIDMAP_SZ - 1) / MIDMAP_SZ;
+	T(("Number of top bits = %d\n", n_top_bits));
+	
+	if (n_top_bits > 1) {
+		n_top_ints = (n_top_bits + BITMAP_WIDTH - 1) / BITMAP_WIDTH;
+	}
+	T(("Number of top ints = %d\n", n_top_ints));
+
+	if (n_mid_ints == 0) {
+		bm->mid_map = NULL;
+		bm->top_map = NULL;
+	} else {
+		bm->mid_map = malloc(n_mid_ints * sizeof(uint64_t));
+		if (n_top_ints == 0) {
+			bm->top_map = NULL;
+		} else {
+			bm->top_map = malloc(n_mid_ints * sizeof(uint64_t));
+		}
+	}
 }
 
-struct m_bitmap* load_bitmap(char *filename)
+static void write_word_to_disk(struct m_bitmap *bm, uint64_t word_idx)
 {
-	return NULL;	
-}
-
-int flush_bitmap_to_file(char *filename)
-{
-	return -1;
-}
-
-int init_bitmap()
-{
-
+	int ret = 0;
+	uint64_t word = (bm->low_map)[word_idx];
+	uint64_t offset = bm->offset + BITMAP_INDEX_TO_OFFSET(word_idx);
+	assert(bm->fd > 0);
+	lseek(bm->fd, offset, SEEK_SET);
+	ret = write(bm->fd, &word, sizeof(uint64_t));
+	assert(ret > 0);
 }
